@@ -129,8 +129,17 @@ impl Interner {
                 sig
             }
             ConceptData::Disjunction(operands) => {
+                // The disjunction's own id belongs in its signature, exactly as
+                // for every other composite concept. `assert_append` scans the
+                // signatures of an axiom's operands for the disjunctions it must
+                // apply `rule_union` to; leaving the id out kept a disjunction
+                // out of that set entirely, so `Bᵢ ⊑ B₁ ⊔ … ⊔ Bₙ` was never
+                // asserted and nothing below a union was classified under it.
                 let operands = operands.clone();
-                operands.iter().flat_map(|&o| self.concept_signature(o)).collect()
+                let mut sig: HashSet<ConceptId> =
+                    operands.iter().flat_map(|&o| self.concept_signature(o)).collect();
+                sig.insert(id);
+                sig
             }
             ConceptData::ExistentialRestriction { concept, .. } => {
                 let concept = *concept;

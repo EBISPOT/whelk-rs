@@ -143,6 +143,11 @@ fn assert_append_with_concepts(axioms: &HashSet<ConceptInclusion>, state: &Reaso
                 for ci in rule_union(c, &operands) {
                     additional_axioms.insert(ci);
                 }
+                // Index the union by each operand so `rule_union_left` can fire.
+                new_state.asserted_unions.insert(c);
+                for &o in &operands {
+                    new_state.unions_by_operand.entry(o).or_default().push_back(c);
+                }
             }
             ConceptData::Complement(inner) => {
                 additional_axioms.insert(rule_complement(c, inner, &mut new_state.interner, new_state.bottom));
@@ -248,6 +253,7 @@ fn process_concept_inclusion(ci: &ConceptInclusion, state: &mut ReasonerState, t
         rule_plus_and_left(ci, state, todo);
         rule_plus_some_b_right(ci, state, todo);
         rule_plus_self(ci, state, todo);
+        rule_union_left(ci, state, todo);
     }
     seen
 }
@@ -841,10 +847,55 @@ fn rule_squiggle(target: ConceptId, todo: &mut Vec<QueueExpression>) {
     todo.push(QueueExpression::Concept(target));
 }
 
+/// `⊔`-elimination: a union is subsumed by anything that subsumes *every* one of
+/// its operands. [`rule_union`] gives only the other direction (each operand
+/// lies under the union), so `(S2 ⊔ S3) ⊑ (S1 ⊔ S2 ⊔ S3)` was never derived —
+/// UBERON's sublaminar-layer unions never classified under one another, and the
+/// parents that should have become redundant survived `reduce`, leaving terms
+/// with seven asserted parents where ROBOT's Whelk leaves two.
+///
+/// Triggered on each derived `o ⊑ X` for an operand `o`: cheap, because the
+/// operand index is empty for the overwhelming majority of concepts.
+fn rule_union_left(ci: &ConceptInclusion, state: &mut ReasonerState, todo: &mut Vec<QueueExpression>) {
+    let mut satisfied: Vec<ConceptId> = Vec::new();
+    if let Some(unions) = state.unions_by_operand.get(&ci.subclass) {
+        for &union in unions {
+            let ConceptData::Disjunction(operands) = state.interner.concept_data(union) else {
+                continue;
+            };
+            let all_covered = operands.iter().all(|o| {
+                state.closure_subs_by_subclass.get(o).is_some_and(|sups| sups.contains(&ci.superclass))
+            });
+            if all_covered {
+                satisfied.push(union);
+            }
+        }
+    }
+    for union in satisfied {
+        let derived = ConceptInclusion { subclass: union, superclass: ci.superclass };
+        // Register it as if it had been told. Transitivity in this saturation
+        // runs off the *asserted* inclusions of a concept, so a merely-derived
+        // `U ⊑ X` would never reach a `C ⊑ U` discovered afterwards — which is
+        // most of them, since the union's own subsumers are usually derived last.
+        process_asserted_concept_inclusion(derived, state, todo);
+        todo.push(QueueExpression::ConceptInclusion(derived));
+    }
+}
+
 fn rule_union(disjunction_id: ConceptId, operands: &HashSet<ConceptId>) -> Vec<ConceptInclusion> {
     operands.iter().map(|&o| ConceptInclusion { subclass: o, superclass: disjunction_id }).collect()
 }
 
+/// `¬B` is not an EL concept, but the constraint it places on the rest of the
+/// ontology is: nothing is both `B` and `¬B`. Emit exactly that, as the
+/// disjointness `B ⊓ ¬B ⊑ ⊥`, and let the conjunction rules derive `X ⊑ ⊥` only
+/// for an `X` actually shown to be both.
+///
+/// Asserting the far stronger `B ⊑ ⊥` instead made every complemented class
+/// unsatisfiable on sight — and OBO ontologies complement freely (NCBITaxon's
+/// disjoint-over-`in taxon` axioms alone put ~2.3k `ObjectComplementOf` into the
+/// Cell Ontology's import closure, which classified as 15,319 of ~19,000 classes
+/// unsatisfiable, the root `CL:0000000` among them).
 fn rule_complement(complement: ConceptId, inner: ConceptId, interner: &mut Interner, bottom: ConceptId) -> ConceptInclusion {
     let contradiction = interner.intern_concept(ConceptData::Conjunction { left: inner, right: complement });
     ConceptInclusion { subclass: contradiction, superclass: bottom }
@@ -1150,6 +1201,70 @@ mod test {
         let whelk = assert(&ontology);
 
         assert!(!whelk.is_subclass_of(a, bottom));
+    }
+
+    /// `A ≡ B ⊔ C` must classify both operands under the union. `rule_union` is
+    /// applied to the disjunctions found in the signatures of an axiom's
+    /// operands, so a disjunction that is not in its own signature is never
+    /// reached and `B ⊑ A` is never derived — which silently dropped every
+    /// class defined by a union. On the Cell Ontology this was the whole of a
+    /// 429-entailment gap against ELK; with it closed the two agree exactly.
+    #[test]
+    fn union_operands_are_subsumed_by_the_disjunction() {
+        let mut interner = Interner::new();
+        let b = interner.intern_concept(ConceptData::AtomicConcept("http://example.org/B".to_string()));
+        let c = interner.intern_concept(ConceptData::AtomicConcept("http://example.org/C".to_string()));
+        let union = interner.intern_concept(ConceptData::Disjunction(vec![b, c].into_iter().collect()));
+        let a = interner.intern_concept(ConceptData::AtomicConcept("http://example.org/A".to_string()));
+
+        let ontology = TranslatedOntology {
+            interner,
+            concept_inclusions: vec![
+                ConceptInclusion { subclass: union, superclass: a },
+                ConceptInclusion { subclass: a, superclass: union },
+            ]
+            .into_iter()
+            .collect::<HashSet<_>>(),
+            role_inclusions: Default::default(),
+            role_compositions: Default::default(),
+            role_ranges: Default::default(),
+        };
+
+        let whelk = assert(&ontology);
+
+        assert!(whelk.is_subclass_of(b, a), "B ⊑ B ⊔ C ≡ A");
+        assert!(whelk.is_subclass_of(c, a), "C ⊑ B ⊔ C ≡ A");
+    }
+
+    /// `⊔`-elimination: everything that subsumes every operand subsumes the union.
+    #[test]
+    fn union_is_subsumed_when_all_operands_are() {
+        let mut interner = Interner::new();
+        let b = interner.intern_concept(ConceptData::AtomicConcept("http://example.org/B".to_string()));
+        let c = interner.intern_concept(ConceptData::AtomicConcept("http://example.org/C".to_string()));
+        let x = interner.intern_concept(ConceptData::AtomicConcept("http://example.org/X".to_string()));
+        let union = interner.intern_concept(ConceptData::Disjunction(vec![b, c].into_iter().collect()));
+
+        // As in a real ontology, the union is named: `U ≡ B ⊔ C`.
+        let u = interner.intern_concept(ConceptData::AtomicConcept("http://example.org/U".to_string()));
+        let ontology = TranslatedOntology {
+            interner,
+            concept_inclusions: vec![
+                ConceptInclusion { subclass: union, superclass: u },
+                ConceptInclusion { subclass: u, superclass: union },
+                ConceptInclusion { subclass: b, superclass: x },
+                ConceptInclusion { subclass: c, superclass: x },
+            ]
+            .into_iter()
+            .collect::<HashSet<_>>(),
+            role_inclusions: Default::default(),
+            role_compositions: Default::default(),
+            role_ranges: Default::default(),
+        };
+
+        let whelk = assert(&ontology);
+        assert!(whelk.is_subclass_of(union, x), "(B ⊔ C) ⊑ X when B ⊑ X and C ⊑ X");
+        assert!(whelk.is_subclass_of(u, x), "and so is the named class equivalent to it");
     }
 
     #[test]
