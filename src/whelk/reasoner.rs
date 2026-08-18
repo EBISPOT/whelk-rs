@@ -80,6 +80,24 @@ impl ReasonerState {
     pub fn is_subclass_of(&self, sub: ConceptId, sup: ConceptId) -> bool {
         self.closure_subs_by_subclass.get(&sub).is_some_and(|supers| supers.contains(&sup))
     }
+
+    /// Every entailed link `subject --role--> target`, indexed by subject.
+    ///
+    /// A link is the reasoner's record of an existential relation: it holds when
+    /// `subject ⊑ role some target`. The subsumption closure alone does not carry
+    /// these — an entailed existential is not a subsumption between named
+    /// concepts — so a relation graph, which flattens each entailed existential
+    /// to a direct `subject role target` edge, has to read them from here.
+    pub fn links_by_subject(&self) -> &HashMap<ConceptId, HashMap<RoleId, HashSet<ConceptId>>> {
+        &self.links_by_subject
+    }
+
+    /// The roles `role` is a subrole of, not including itself. A relation graph
+    /// records an edge under every role a link's own role entails, so it needs
+    /// the saturated hierarchy rather than the asserted inclusions.
+    pub fn super_roles(&self, role: RoleId) -> Option<&HashSet<RoleId>> {
+        self.hier.get(&role)
+    }
 }
 
 pub fn assert(ontology: &TranslatedOntology) -> ReasonerState {
