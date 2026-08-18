@@ -98,6 +98,18 @@ impl ReasonerState {
     pub fn super_roles(&self, role: RoleId) -> Option<&HashSet<RoleId>> {
         self.hier.get(&role)
     }
+
+    /// The range declared for `role`, as the concept every one of its targets
+    /// satisfies.
+    ///
+    /// A link records the filler the axiom named, not the filler narrowed by the
+    /// range, so what a target really satisfies is the
+    /// [`ConceptData::RoleTarget`] over this range and that filler. A reader that
+    /// wants the full set — a relation graph, whose edges end at every class the
+    /// target is an instance of — has to go through it.
+    pub fn role_range(&self, role: RoleId) -> Option<ConceptId> {
+        self.role_ranges.get(&role).copied()
+    }
 }
 
 pub fn assert(ontology: &TranslatedOntology) -> ReasonerState {
