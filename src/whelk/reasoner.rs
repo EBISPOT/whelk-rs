@@ -110,6 +110,18 @@ impl ReasonerState {
     pub fn role_range(&self, role: RoleId) -> Option<ConceptId> {
         self.role_ranges.get(&role).copied()
     }
+
+    /// The property chains, saturated over the role hierarchy, as
+    /// `first → second → the roles the pair composes to`.
+    ///
+    /// A link under a composed role is derived from a pair of links, and its
+    /// target is the SECOND one's — so what that target really satisfies is
+    /// narrowed by the second role's range even though the composed role
+    /// declares none of its own. A reader that flattens links to edges needs the
+    /// chains to see that.
+    pub fn role_compositions(&self) -> &HashMap<RoleId, HashMap<RoleId, Vector<RoleId>>> {
+        &self.hier_comps
+    }
 }
 
 pub fn assert(ontology: &TranslatedOntology) -> ReasonerState {
