@@ -1,7 +1,7 @@
 extern crate log;
 
 use horned_owl::io::ParserConfiguration;
-use horned_owl::model::RcStr;
+use horned_owl::model::{RcAnnotatedComponent, RcStr};
 use horned_owl::ontology::set::SetOntology;
 use std::fs::File;
 use std::io::BufReader;
@@ -23,7 +23,10 @@ pub fn read_input(input_path: &path::PathBuf) -> Result<SetOntology<RcStr>, Box<
             Ok(ret.0)
         }
         Some("owl") => {
-            let ret = horned_owl::io::rdf::reader::read(&mut bufreader, config)?;
+            let ret = horned_owl::io::rdf::reader::read::<RcStr, RcAnnotatedComponent, _, _>(
+                &mut bufreader,
+                config.into(),
+            )?;
             Ok(ret.0.into())
         }
         _ => Err(Box::<dyn error::Error>::from("unable to parse input")),
